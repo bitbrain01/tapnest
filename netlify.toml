@@ -1,0 +1,18 @@
+# netlify.toml
+# Place this at the root of your deployed site's repo.
+
+[build]
+  functions = "netlify/functions"
+
+# Routes anything like https://yourapp.com/r/ABC12 to the resolve function,
+# passing ABC12 through as a query param the function reads.
+[[redirects]]
+  from = "/r/:shortcode"
+  to = "/.netlify/functions/resolve?code=:shortcode"
+  status = 200
+  force = true
+
+# Same for NFC-tagged links, e.g. https://yourapp.com/r/ABC12?c=nfc
+# (channel param passes through automatically via the querystring, no
+# extra redirect rule needed — the browser sends ?c=nfc straight to the
+# path above, which is preserved by Netlify's redirect engine.)
