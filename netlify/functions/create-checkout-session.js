@@ -17,9 +17,20 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
+const CORS_HEADERS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers": "Content-Type",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+};
+
 exports.handler = async (event) => {
+  // Handle the browser's CORS preflight request
+  if (event.httpMethod === "OPTIONS") {
+    return { statusCode: 204, headers: CORS_HEADERS, body: "" };
+  }
+
   if (event.httpMethod !== "POST") {
-    return { statusCode: 405, body: "Method not allowed" };
+    return { statusCode: 405, headers: CORS_HEADERS, body: "Method not allowed" };
   }
 
   const body = JSON.parse(event.body);
@@ -32,7 +43,7 @@ exports.handler = async (event) => {
   const { cart, user_id, guest_email } = body;
 
   if (!cart || cart.length === 0) {
-    return { statusCode: 400, body: "Cart is empty" };
+    return { statusCode: 400, headers: CORS_HEADERS, body: "Cart is empty" };
   }
 
   // Fetch product details (price, name) server-side — never trust
@@ -44,7 +55,7 @@ exports.handler = async (event) => {
     .in("id", productIds);
 
   if (prodErr) {
-    return { statusCode: 500, body: `Failed to load products: ${prodErr.message}` };
+    return { statusCode: 500, headers: CORS_HEADERS, body: `Failed to load products: ${prodErr.message}` };
   }
 
   // Validate stock and build line items
@@ -54,10 +65,10 @@ exports.handler = async (event) => {
   for (const cartLine of cart) {
     const product = products.find((p) => p.id === cartLine.product_id);
     if (!product || !product.active) {
-      return { statusCode: 400, body: `Product ${cartLine.product_id} not found or inactive` };
+      return { statusCode: 400, headers: CORS_HEADERS, body: `Product ${cartLine.product_id} not found or inactive` };
     }
     if (product.stock_quantity !== null && product.stock_quantity < cartLine.quantity) {
-      return { statusCode: 400, body: `${product.name} is out of stock` };
+      return { statusCode: 400, headers: CORS_HEADERS, body: `${product.name} is out of stock` };
     }
     const unitAmount = Math.round(product.base_price_usd * 100);
     subtotal += unitAmount * cartLine.quantity;
@@ -85,7 +96,7 @@ exports.handler = async (event) => {
     .single();
 
   if (orderErr) {
-    return { statusCode: 500, body: `Failed to create order: ${orderErr.message}` };
+    return { statusCode: 500, headers: CORS_HEADERS, body: `Failed to create order: ${orderErr.message}` };
   }
 
   // Create matching order_items rows (item_id left null — resale
@@ -103,7 +114,7 @@ exports.handler = async (event) => {
 
   const { error: itemsErr } = await supabase.from("order_items").insert(orderItemRows);
   if (itemsErr) {
-    return { statusCode: 500, body: `Failed to create order items: ${itemsErr.message}` };
+    return { statusCode: 500, headers: CORS_HEADERS, body: `Failed to create order items: ${itemsErr.message}` };
   }
 
   // Create the Stripe Checkout Session
@@ -119,6 +130,7 @@ exports.handler = async (event) => {
 
   return {
     statusCode: 200,
+    headers: CORS_HEADERS,
     body: JSON.stringify({ checkout_url: session.url }),
   };
 };
