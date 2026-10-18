@@ -11,7 +11,9 @@
 //       product_id,                // required
 //       quantity,                  // required, integer >= 1
 //       customization_id,          // optional: a row from product_customizations
-//       custom_text                // optional: only used if the option requires_text
+//       custom_text,               // optional: only used if the option requires_text
+//       reorder_item_id,           // optional: ordering extra hardware for an EXISTING item
+//       reorder_shortcode          // optional: must match that item's shortcode if sent
 //     }
 //   ],
 //   user_id: "..." | null,         // null for guest checkout
@@ -42,6 +44,14 @@ const CORS_HEADERS = {
 };
 
 const MAX_CUSTOM_TEXT_LENGTH = 100;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// Accept the reorder fields either on the cart line itself or nested under
+// customization_details, since the storefront may send either shape.
+const getReorderId = (line) =>
+  line.reorder_item_id ?? line.customization_details?.reorder_item_id ?? null;
+const getReorderShortcode = (line) =>
+  line.reorder_shortcode ?? line.customization_details?.reorder_shortcode ?? null;
 
 const fail = (statusCode, message) => ({
   statusCode,
@@ -83,7 +93,7 @@ exports.handler = async (event) => {
     const productIds = [...new Set(cart.map((c) => c.product_id))];
     const { data: products, error: prodErr } = await supabase
       .from("products")
-      .select("id, name, base_price_usd, stock_quantity, active")
+      .select("id, name, base_price_usd, stock_quantity, active, locked_use_case, locked_platform_template_id, allowed_use_cases")
       .in("id", productIds);
     if (prodErr) return fail(500, `Failed to load products: ${prodErr.message}`);
 
@@ -101,6 +111,23 @@ exports.handler = async (event) => {
         .in("id", customizationIds);
       if (error) return fail(500, `Failed to load customization options: ${error.message}`);
       customizations = data;
+    }
+
+    // ---------- Load existing items for reorder lines (if any) ----------
+    const reorderIds = [...new Set(cart.map(getReorderId).filter(Boolean))];
+    for (const id of reorderIds) {
+      if (typeof id !== "string" || !UUID_RE.test(id)) {
+        return fail(400, "Invalid reorder reference");
+      }
+    }
+    let reorderItems = [];
+    if (reorderIds.length > 0) {
+      const { data, error } = await supabase
+        .from("items")
+        .select("id, shortcode, status, use_case, platform_template_id")
+        .in("id", reorderIds);
+      if (error) return fail(500, `Failed to load reorder items: ${error.message}`);
+      reorderItems = data;
     }
 
     // ---------- Stock check (aggregated per product across cart lines) ----------
@@ -147,6 +174,40 @@ exports.handler = async (event) => {
         }
       }
 
+      // ---- Reorder: extra hardware pointing at an existing, active item ----
+      let reorderItem = null;
+      const reorderId = getReorderId(line);
+      if (reorderId) {
+        reorderItem = reorderItems.find((i) => i.id === reorderId);
+        // Must be an ACTIVE item. Never allow unclaimed inventory to be
+        // "reserved" through a reorder.
+        if (!reorderItem || reorderItem.status !== "active") {
+          return fail(400, "The link you are ordering extra hardware for was not found or is not active");
+        }
+        const sentShortcode = getReorderShortcode(line);
+        if (sentShortcode && sentShortcode !== reorderItem.shortcode) {
+          return fail(400, "Reorder details do not match");
+        }
+        // The product must be compatible with what the item is.
+        if (product.locked_use_case) {
+          const wrongUseCase = product.locked_use_case !== reorderItem.use_case;
+          const wrongPlatform =
+            product.locked_platform_template_id &&
+            product.locked_platform_template_id !== reorderItem.platform_template_id;
+          if (wrongUseCase || wrongPlatform) {
+            return fail(400, `${product.name} can't be ordered for that link`);
+          }
+        } else if (
+          Array.isArray(product.allowed_use_cases) &&
+          !product.allowed_use_cases.includes(reorderItem.use_case)
+        ) {
+          return fail(400, `${product.name} can't be ordered for that link`);
+        }
+        // Store the shortcode from the DATABASE, not the value the browser sent
+        customizationData.reorder_item_id = reorderItem.id;
+        customizationData.reorder_shortcode = reorderItem.shortcode;
+      }
+
       const extraPrice = customization ? Number(customization.extra_price_usd) : 0;
       const unitAmountCents = Math.round((Number(product.base_price_usd) + extraPrice) * 100);
       subtotalCents += unitAmountCents * line.quantity;
@@ -157,8 +218,15 @@ exports.handler = async (event) => {
       const productData = {
         name: showTier ? `${product.name} - ${customization.name}` : product.name,
       };
+      const descriptionParts = [];
       if (customizationData.custom_text) {
-        productData.description = `Custom text: ${customizationData.custom_text}`;
+        descriptionParts.push(`Custom text: ${customizationData.custom_text}`);
+      }
+      if (customizationData.reorder_shortcode) {
+        descriptionParts.push(`Extra hardware for tapn.st/r/${customizationData.reorder_shortcode}`);
+      }
+      if (descriptionParts.length > 0) {
+        productData.description = descriptionParts.join(" | ");
       }
 
       lineItems.push({
@@ -178,6 +246,7 @@ exports.handler = async (event) => {
         customization_price_usd: extraPrice,          // extra fee per unit, snapshotted
         customization_data: customizationData,
         artwork_status: artworkStatus,
+        item_id: reorderItem ? reorderItem.id : null, // existing item for reorders, otherwise set later
         configure_now: false,
       });
     }
