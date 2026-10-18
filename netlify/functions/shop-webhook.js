@@ -65,6 +65,7 @@ exports.handler = async (event) => {
     .from("orders")
     .update({
       status: "paid",
+      customer_email: session.customer_details?.email ?? null,
       stripe_payment_intent_id: session.payment_intent,
       shipping_address: session.shipping_details ?? session.customer_details ?? null,
     })
