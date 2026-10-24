@@ -14,10 +14,13 @@
 //       custom_text,               // optional: only used if the option requires_text
 //       reorder_item_id,           // optional: ordering extra hardware for an EXISTING item
 //       reorder_shortcode          // optional: must match that item's shortcode if sent
+//                                  // (the product must have allow_same_link_reorder = true;
+//                                  //  run that column's SQL BEFORE deploying this file)
 //     }
 //   ],
 //   user_id: "..." | null,         // null for guest checkout
-//   guest_email: "..." | null
+//   guest_email: "..." | null,
+//   referral_code: "sarah" | null  // optional sales-rep / campaign code (?ref=sarah)
 // }
 //
 // All prices are computed HERE from the database. Prices sent by the
@@ -44,6 +47,50 @@ const CORS_HEADERS = {
 };
 
 const MAX_CUSTOM_TEXT_LENGTH = 100;
+// ---------- Referral codes (?ref=sarah) ----------
+// The code comes from a URL, so it is untrusted text. Three layers:
+//  1. Format: lower-case letters, numbers, dash, underscore, max 40 characters.
+//  2. Registry: it must be an ACTIVE row in the sales_reps table (created by you
+//     in the admin). Unknown or inactive codes are ignored.
+//  3. Fallback ONLY if the sales_reps table can't be read (not created yet):
+//     the Netlify variable VALID_REFERRAL_CODES (comma-separated). If that is
+//     not set either, any well-formed code is kept, so nothing is lost while
+//     you are still setting up.
+// An ignored code never blocks a sale. It just isn't credited to anyone.
+const cleanReferral = (raw) => {
+  if (typeof raw !== "string") return null;
+  const code = raw.trim().toLowerCase();
+  return /^[a-z0-9][a-z0-9_-]{0,39}$/.test(code) ? code : null;
+};
+
+const passesApprovedList = (code) => {
+  const approved = (process.env.VALID_REFERRAL_CODES || "")
+    .split(",")
+    .map((c) => c.trim().toLowerCase())
+    .filter(Boolean);
+  return approved.length === 0 || approved.includes(code);
+};
+
+// true = active rep, false = not a rep / inactive, undefined = lookup failed
+async function lookupRep(code) {
+  const { data, error } = await supabase
+    .from("sales_reps")
+    .select("code")
+    .eq("code", code)
+    .eq("active", true)
+    .maybeSingle();
+  if (error) return undefined;
+  return !!data;
+}
+
+async function resolveReferral(raw) {
+  const code = cleanReferral(raw);
+  if (!code) return null;
+  const registered = await lookupRep(code);
+  if (registered === true) return code;
+  if (registered === false) return null;
+  return passesApprovedList(code) ? code : null;
+}
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 // Accept the reorder fields either on the cart line itself or nested under
@@ -78,7 +125,8 @@ exports.handler = async (event) => {
       return fail(400, "Invalid request body");
     }
 
-    const { cart, user_id, guest_email } = body;
+    const { cart, user_id, guest_email, referral_code } = body;
+    const referralCode = await resolveReferral(referral_code);
 
     if (!Array.isArray(cart) || cart.length === 0) {
       return fail(400, "Cart is empty");
@@ -93,7 +141,7 @@ exports.handler = async (event) => {
     const productIds = [...new Set(cart.map((c) => c.product_id))];
     const { data: products, error: prodErr } = await supabase
       .from("products")
-      .select("id, name, base_price_usd, stock_quantity, active, locked_use_case, locked_platform_template_id, allowed_use_cases")
+      .select("id, name, base_price_usd, stock_quantity, active, locked_use_case, locked_platform_template_id, allowed_use_cases, allow_same_link_reorder")
       .in("id", productIds);
     if (prodErr) return fail(500, `Failed to load products: ${prodErr.message}`);
 
@@ -188,6 +236,12 @@ exports.handler = async (event) => {
         if (sentShortcode && sentShortcode !== reorderItem.shortcode) {
           return fail(400, "Reorder details do not match");
         }
+        // The product being bought must be enabled for same-link reorders
+        // (products.allow_same_link_reorder). Checked here on the server, so
+        // hiding a button in the app is never the only protection.
+        if (product.allow_same_link_reorder !== true) {
+          return fail(400, `${product.name} can't be ordered as extra copies of an existing link`);
+        }
         // The product must be compatible with what the item is.
         if (product.locked_use_case) {
           const wrongUseCase = product.locked_use_case !== reorderItem.use_case;
@@ -260,6 +314,7 @@ exports.handler = async (event) => {
         status: "pending",
         subtotal_usd: subtotalCents / 100,
         total_usd: subtotalCents / 100, // add shipping here later if needed
+        ...(referralCode ? { referral_code: referralCode } : {}),
       })
       .select()
       .single();
@@ -282,7 +337,7 @@ exports.handler = async (event) => {
       success_url: `${process.env.SHOP_URL}/orders/${order.id}?success=true`,
       cancel_url: `${process.env.SHOP_URL}/cart?cancelled=true`,
       shipping_address_collection: { allowed_countries: ["US", "CA"] }, // adjust as needed
-      metadata: { order_id: order.id },
+      metadata: { order_id: order.id, ...(referralCode ? { referral_code: referralCode } : {}) },
     });
 
     return {
