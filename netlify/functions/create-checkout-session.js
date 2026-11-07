@@ -332,6 +332,7 @@ exports.handler = async (event) => {
     // ---------- Create the Stripe Checkout Session ----------
     const session = await stripe.checkout.sessions.create({
       mode: "payment",
+      allow_promotion_codes: true, // <--- ADD THIS LINE
       line_items: lineItems,
       customer_email: guest_email ?? undefined,
       success_url: `${process.env.SHOP_URL}/orders/${order.id}?success=true`,
