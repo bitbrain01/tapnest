@@ -337,7 +337,15 @@ exports.handler = async (event) => {
       customer_email: guest_email ?? undefined,
       success_url: `${process.env.SHOP_URL}/orders/${order.id}?success=true`,
       cancel_url: `${process.env.SHOP_URL}/cart?cancelled=true`,
-      shipping_address_collection: { allowed_countries: ["US", "CA"] }, // adjust as needed
+      shipping_address_collection: { 
+        allowed_countries: [
+          "US", "CA", "GB", "AU", "NZ", "DE", "FR", "IT", "ES", "NL", "IE"
+        ] 
+      },
+      shipping_options: [
+        { shipping_rate: "shr_1UZJ1IAH5IBqy52ngupmCa2Z" }, // Standard $4.99
+        { shipping_rate: "shr_1UZJ2fAH5IBqy52nXalLaaOl" }, // International $19.99
+      ],
       metadata: { order_id: order.id, ...(referralCode ? { referral_code: referralCode } : {}) },
     });
 
